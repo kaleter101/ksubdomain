@@ -7,7 +7,7 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/mattn/go-colorable v0.1.12
-	github.com/miekg/dns v1.1.65
+	github.com/miekg/dns v1.1.66
 	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5
 	github.com/stretchr/testify v1.6.1
 	github.com/urfave/cli/v2 v2.3.0

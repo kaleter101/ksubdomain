@@ -116,8 +116,11 @@ OPTIONS:
    --stdin                          接受stdin输入 (default: false)
    --not-print, --np                不打印域名结果 (default: false)
    --eth value, -e value            指定网卡名称
-   --wild-filter-mode value         泛解析过滤模式[从最终结果过滤泛解析域名]: basic(基础), advanced(高级), none(不过滤ne")
+   --wild-filter-mode value         泛解析过滤模式[从最终结果过滤泛解析域名]: basic(基础), advanced(高级), none(不过滤) (default: "none")
    --predict                        启用预测域名模式 (default: false)
+   --max-cname-recs value           CNAME解析最大递归深度 (default: 10)
+   --predict-dict value             用于预测模式的自定义字典文件路径
+   --predict-patterns value         用于预测模式的自定义模式文件路径
    --help, -h                       show help (default: false)
 
 # 示例:
@@ -158,8 +161,13 @@ OPTIONS:
    --eth value, -e value            指定网卡名称
    --wild-filter-mode value         泛解析过滤模式[从最终结果过滤泛解析域名]: basic(基础), advanced(高级), none(不过滤) (default: "none")
    --predict                        启用预测域名模式 (default: false)
+   --max-cname-recs value           CNAME解析最大递归深度 (default: 10)
    --filename value, -f value       字典路径
    --ns                             读取域名ns记录并加入到ns解析器中 (default: false)
+   --axfr                           尝试对域名的授权NS服务器进行AXFR域传送 (default: false)
+   --axfr-timeout value             AXFR尝试的超时时间(秒) (default: 10)
+   --predict-dict value             用于预测模式的自定义字典文件路径
+   --predict-patterns value         用于预测模式的自定义模式文件路径
    --help, -h                       show help (default: false)
 
 # 示例:
@@ -174,9 +182,33 @@ cat domains.txt | ./ksubdomain e --stdin -b 10M
 
 # 启用预测模式枚举域名，泛解析过滤，保存为csv
 ./ksubdomain e -d example.com --predict --wild-filter-mode advanced --oy csv -o output.csv
+
+# 使用自定义预测字典和模式，并尝试AXFR (需配合--ns获取NS服务器)
+./ksubdomain e -d example.com --ns --axfr --predict --predict-dict my.dict --predict-patterns my.cfg -o results.txt
 ```
 
-## ✨ 特性与技巧
+## ✨ 新特性详解 (v2.x 新增)
+
+*   **CNAME 递归解析 (Recursive CNAME Expansion):**
+    *   KSubdomain 现在能够递归解析 CNAME 记录，直至找到最终的 A/AAAA 记录或达到最大递归深度。
+    *   使用 `--max-cname-recs <深度>` 参数控制最大递归层数 (默认: 10)。
+
+*   **AXFR 域传送尝试 (AXFR Attempt):**
+    *   新增 AXFR (DNS Zone Transfer) 尝试功能。
+    *   使用 `--axfr` 标记 (推荐与 `--ns` 配合使用，以自动获取目标域的授权 NS 服务器)。
+    *   工具将尝试从授权 NS 服务器进行域传送，以获取全量 DNS 记录。
+    *   可通过 `--axfr-timeout <秒数>` 设置 AXFR 请求的超时时间 (默认: 10 秒)。
+    *   注意: 此功能通常仅对配置错误的 DNS 服务器有效。
+
+*   **增强的子域名预测 (Enhanced Subdomain Prediction):**
+    *   内置的预测字典 (`regular.dict`) 和模式 (`regular.cfg`) 得到了大幅扩充，增加了更多分类如 `[service]`, `[version]`, `[geo]`, `[number]` 以及更丰富的生成模式。
+    *   用户现在可以通过 `--predict-dict <字典文件路径>` 和 `--predict-patterns <模式文件路径>` 提供自定义的预测字典和模式规则，实现更灵活和定制化的子域名生成。
+
+*   **改进的泛解析检测与过滤 (Improved Wildcard Detection & Filtering):**
+    *   泛解析检测机制得到显著增强。在扫描开始前，KSubdomain 会对用户提供的基础域名进行主动探测，识别其泛解析特征（如通配符 IP 地址和 CNAME 记录）。
+    *   这些预先探测到的信息将被用于后续的泛解析过滤阶段 (`basic` 或 `advanced` 模式)，从而更准确地识别和过滤掉泛解析产生的无效结果。
+
+## ✨ 原有特性与技巧
 
 *   **带宽自动适配:** 只需使用 `-b` 参数指定你的公网下行带宽 (如 `-b 10m`), KSubdomain 会自动优化发包速率。
 *   **测试最大速率:** 运行 `./ksubdomain test` 测试当前环境的最大理论发包速率。

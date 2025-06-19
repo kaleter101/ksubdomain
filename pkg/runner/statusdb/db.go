@@ -10,9 +10,11 @@ import (
 type Item struct {
 	Domain      string    // 查询域名
 	Dns         string    // 查询dns
-	Time        time.Time // 发送时间
-	Retry       int       // 重试次数
-	DomainLevel int       // 域名层级
+	Time          time.Time // 发送时间
+	Retry         int       // 重试次数
+	DomainLevel   int       // 域名层级
+	CNAMEDepth    uint8     // CNAME recursion depth
+	OriginalQuery string    // Original query domain if this is a CNAME resolution
 }
 
 // StatusDb 使用分片锁实现的高性能状态数据库
