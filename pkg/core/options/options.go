@@ -31,7 +31,13 @@ type Options struct {
 	SpecialResolvers   map[string][]string // 可针对特定域名使用的dns resolvers
 	WildcardFilterMode string              // 泛解析过滤模式: "basic", "advanced", "none"
 	WildIps            []string
-	Predict            bool // 是否开启预测模式
+	Predict            bool  // 是否开启预测模式
+	MaxCNAMERecs       uint8 // Maximum CNAME recursion depth
+	AttemptAXFR        bool     // Whether to attempt AXFR
+	AXFRTimeout        int      // Timeout in seconds for AXFR attempts
+	PredictDictFile    string   // Custom dictionary file for prediction
+	PredictPatternFile string   // Custom pattern file for prediction
+	OriginalDomains    []string // List of original base domains provided by the user
 }
 
 func Band2Rate(bandWith string) int64 {

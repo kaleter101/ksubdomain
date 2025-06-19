@@ -48,7 +48,7 @@ func (r *Runner) predict(res result.Result, predictChan chan string) error {
 	if r.domainChan == nil {
 		return fmt.Errorf("域名通道未初始化")
 	}
-	_, err := predict.PredictDomains(res.Subdomain, predictChan)
+	_, err := predict.PredictDomains(res.Subdomain, predictChan, r.options.PredictDictFile, r.options.PredictPatternFile)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/boy-hack/ksubdomain/v2/pkg/core"
 	"github.com/boy-hack/ksubdomain/v2/pkg/core/gologger"
+	"github.com/boy-hack/ksubdomain/v2/pkg/runner" // For WildcardDetectionResult (though unused by screen)
 	"github.com/boy-hack/ksubdomain/v2/pkg/runner/result"
 )
 
@@ -39,6 +40,8 @@ func (s *ScreenOutput) WriteDomainResult(domain result.Result) error {
 	return nil
 }
 
-func (s *ScreenOutput) Close() error {
+func (s *ScreenOutput) Close(wildcardInfo map[string]*runner.WildcardDetectionResult) error {
+	// Screen output is line-by-line, advanced filtering at Close is not applied here.
+	// The wildcardInfo is ignored.
 	return nil
 }

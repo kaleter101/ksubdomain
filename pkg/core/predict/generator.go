@@ -4,33 +4,46 @@ import (
 	"bufio"
 	_ "embed"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"sync"
 )
 
 //go:embed data/regular.cfg
-var cfg string
+var defaultCfg string
 
 //go:embed data/regular.dict
-var dict string
+var defaultDict string
 
 // DomainGenerator 用于生成预测域名
 type DomainGenerator struct {
-	categories map[string][]string // 存储块分类和对应的值
-	patterns   []string            // 域名组合模式
-	subdomain  string              // 子域名部分
-	domain     string              // 根域名部分
-	output     chan string         // 输出接口
-	count      int                 // 生成的域名计数
-	mu         sync.Mutex          // 保护count和output的互斥锁
+	categories       map[string][]string // 存储块分类和对应的值
+	patterns         []string            // 域名组合模式
+	subdomain        string              // 子域名部分
+	domain           string              // 根域名部分
+	output           chan string         // 输出接口
+	count            int                 // 生成的域名计数
+	mu               sync.Mutex          // 保护count和output的互斥锁
+	dictFilePath     string              // Optional custom dictionary file path
+	patternFilePath  string              // Optional custom pattern file path
+}
+
+// NewDomainGeneratorOptions provides options for creating a new DomainGenerator.
+type NewDomainGeneratorOptions struct {
+	Output           chan string
+	DictFilePath     string
+	PatternFilePath  string
 }
 
 // NewDomainGenerator 创建一个新的域名生成器
-func NewDomainGenerator(output chan string) (*DomainGenerator, error) {
+func NewDomainGenerator(opts NewDomainGeneratorOptions) (*DomainGenerator, error) {
 	// 创建生成器实例
 	dg := &DomainGenerator{
-		categories: make(map[string][]string),
-		output:     output,
+		categories:      make(map[string][]string),
+		output:          opts.Output,
+		dictFilePath:    opts.DictFilePath,
+		patternFilePath: opts.PatternFilePath,
 	}
 
 	// 加载分类字典
@@ -48,7 +61,20 @@ func NewDomainGenerator(output chan string) (*DomainGenerator, error) {
 
 // 从字典文件加载分类信息
 func (dg *DomainGenerator) loadDictionary() error {
-	scanner := bufio.NewScanner(strings.NewReader(dict))
+	var reader io.Reader
+	if dg.dictFilePath != "" {
+		file, err := os.Open(dg.dictFilePath)
+		if err != nil {
+			return fmt.Errorf("打开自定义字典文件 %s 失败: %w", dg.dictFilePath, err)
+		}
+		defer file.Close()
+		reader = file
+		fmt.Printf("使用自定义字典: %s\n", dg.dictFilePath) // Inform user
+	} else {
+		reader = strings.NewReader(defaultDict)
+	}
+
+	scanner := bufio.NewScanner(reader)
 	var currentCategory string
 
 	for scanner.Scan() {
@@ -72,7 +98,19 @@ func (dg *DomainGenerator) loadDictionary() error {
 
 // 从配置文件加载域名生成模式
 func (dg *DomainGenerator) loadPatterns() error {
-	scanner := bufio.NewScanner(strings.NewReader(cfg))
+	var reader io.Reader
+	if dg.patternFilePath != "" {
+		file, err := os.Open(dg.patternFilePath)
+		if err != nil {
+			return fmt.Errorf("打开自定义模式文件 %s 失败: %w", dg.patternFilePath, err)
+		}
+		defer file.Close()
+		reader = file
+		fmt.Printf("使用自定义模式: %s\n", dg.patternFilePath) // Inform user
+	} else {
+		reader = strings.NewReader(defaultCfg)
+	}
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line != "" {
@@ -181,14 +219,19 @@ func (dg *DomainGenerator) processPattern(pattern string, replacements map[strin
 }
 
 // PredictDomains 根据给定域名预测可能的域名变体，直接输出结果
-func PredictDomains(domain string, output chan string) (int, error) {
+func PredictDomains(domain string, output chan string, dictFile string, patternFile string) (int, error) {
 	// 检查输出对象是否为nil
 	if output == nil {
 		return 0, fmt.Errorf("输出对象不能为空")
 	}
 
 	// 创建域名生成器
-	generator, err := NewDomainGenerator(output)
+	opts := NewDomainGeneratorOptions{
+		Output:          output,
+		DictFilePath:    dictFile,
+		PatternFilePath: patternFile,
+	}
+	generator, err := NewDomainGenerator(opts)
 	if err != nil {
 		return 0, err
 	}

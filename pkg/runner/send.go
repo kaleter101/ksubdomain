@@ -98,29 +98,55 @@ func (c *packetTemplateCache) getOrCreate(dnsname string, ether *device.EtherTab
 // 发送包的缓存
 var templateCache = newPacketTemplateCache()
 
+// defaultQueryTypes specifies the DNS record types to query for each domain by default.
+var defaultQueryTypes = []layers.DNSType{
+	layers.DNSTypeA,
+	layers.DNSTypeAAAA,
+	layers.DNSTypeMX,
+	layers.DNSTypeTXT,
+	layers.DNSTypeCNAME, // Querying for CNAME is useful for direct CNAMEs, though resolver usually provides it with A.
+	layers.DNSTypeNS,
+	layers.DNSTypeSOA,
+	layers.DNSTypePTR, // PTR is usually for IP reverse lookup, but can exist for names.
+}
+
 // sendCycle 实现发送域名请求的循环
 func (r *Runner) sendCycle() {
 	// 从发送通道接收域名，分发给工作协程
 	for domain := range r.domainChan {
+		// Rate limit per domain, not per packet, to simplify.
+		// If rate limiting per packet is needed, Take() should be inside the types loop.
 		r.rateLimiter.Take()
+
 		v, ok := r.statusDB.Get(domain)
 		if !ok {
 			v = statusdb.Item{
 				Domain:      domain,
 				Dns:         r.selectDNSServer(domain),
-				Time:        time.Now(),
+				Time:        time.Now(), // This time will be updated per-packet type by some logic if needed
 				Retry:       0,
-				DomainLevel: 0,
+				DomainLevel: 0, // DomainLevel might need adjustment if CNAMEs are primary factor
 			}
+			// Add to statusDB before sending any packets for this domain
 			r.statusDB.Add(domain, v)
 		} else {
+			// If item exists, it's a retry for this domain. Update its timestamp and selected DNS.
+			// The Retry count on the item itself might reflect retries of the whole domain block.
 			v.Retry += 1
 			v.Time = time.Now()
 			v.Dns = r.selectDNSServer(domain)
 			r.statusDB.Set(domain, v)
 		}
-		send(domain, v.Dns, r.options.EtherInfo, r.dnsID, uint16(r.listenPort), r.pcapHandle, layers.DNSTypeA)
-		atomic.AddUint64(&r.sendCount, 1)
+
+		for _, dnsType := range defaultQueryTypes {
+			// It's important that statusDB correctly reflects what's in flight.
+			// Current statusDB is per-domain. If a retry for a domain occurs, all types are resent.
+			// This is a simplification. A more granular statusDB would track domain+type.
+			// For now, the timestamp in statusDB for a domain effectively becomes the timestamp
+			// of the *last packet type sent* for that domain in this batch.
+			send(domain, v.Dns, r.options.EtherInfo, r.dnsID, uint16(r.listenPort), r.pcapHandle, dnsType)
+			atomic.AddUint64(&r.sendCount, 1) // Increment for each packet sent
+		}
 	}
 }
 

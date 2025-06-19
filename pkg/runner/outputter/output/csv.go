@@ -3,8 +3,10 @@ package output
 import (
 	"encoding/csv"
 	"os"
+	"strings" // Added for strings.Join
 
 	"github.com/boy-hack/ksubdomain/v2/pkg/core/gologger"
+	"github.com/boy-hack/ksubdomain/v2/pkg/runner" // Added for WildcardDetectionResult
 	"github.com/boy-hack/ksubdomain/v2/pkg/runner/result"
 	"github.com/boy-hack/ksubdomain/v2/pkg/utils"
 )
@@ -28,23 +30,27 @@ func (f *CsvOutput) WriteDomainResult(domain result.Result) error {
 	return nil
 }
 
-func (f *CsvOutput) Close() error {
+func (f *CsvOutput) Close(wildcardInfo map[string]*runner.WildcardDetectionResult) error {
 	gologger.Infof("写入csv文件:%s\n", f.filename)
 
-	// 检查结果数量
 	if len(f.domains) == 0 {
 		gologger.Infof("没有发现子域名结果，CSV文件将为空\n")
+		// Create file with headers even if no domains
+		file, err := os.Create(f.filename)
+		if err != nil {
+			gologger.Errorf("创建空的CSV文件失败: %v", err)
+			return err
+		}
+		defer file.Close()
+		writer := csv.NewWriter(file)
+		defer writer.Flush()
+		header := []string{"Subdomain", "Answers", "Source", "CNAMEChain"}
+		_ = writer.Write(header) // Write header
 		return nil
 	}
 
-	results := utils.WildFilterOutputResult(f.wildFilterMode, f.domains)
+	results := utils.WildFilterOutputResult(f.wildFilterMode, f.domains, wildcardInfo)
 	gologger.Infof("过滤后结果数量: %d\n", len(results))
-
-	// 检查过滤后结果
-	if len(results) == 0 {
-		gologger.Infof("经过通配符过滤后没有有效结果，CSV文件将为空\n")
-		return nil
-	}
 
 	// 创建CSV文件
 	file, err := os.Create(f.filename)
@@ -56,12 +62,19 @@ func (f *CsvOutput) Close() error {
 
 	// 创建CSV写入器
 	writer := csv.NewWriter(file)
+	defer writer.Flush()
 
 	// 写入CSV头部
-	err = writer.Write([]string{"Subdomain", "Answers"})
+	header := []string{"Subdomain", "Answers", "Source", "CNAMEChain"} // Added Source and CNAMEChain
+	err = writer.Write(header)
 	if err != nil {
 		gologger.Errorf("写入CSV头部失败: %v", err)
-		return err
+		return err // If header fails, probably no point continuing
+	}
+
+	if len(results) == 0 {
+		gologger.Infof("经过通配符过滤后没有有效结果，CSV文件将只包含头部\n")
+		return nil
 	}
 
 	// 写入数据行
@@ -75,13 +88,12 @@ func (f *CsvOutput) Close() error {
 			}
 		}
 
-		err = writer.Write([]string{result.Subdomain, answersStr})
+		err = writer.Write([]string{result.Subdomain, answersStr, result.Source, strings.Join(result.CNAMEChain, ";")})
 		if err != nil {
 			gologger.Errorf("写入CSV数据行失败: %v", err)
-			continue
+			continue // Skip problematic row
 		}
 	}
-	writer.Flush()
 	gologger.Infof("CSV文件写入成功，共写入 %d 条记录", len(results))
 	return nil
 }

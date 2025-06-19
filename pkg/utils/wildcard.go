@@ -4,8 +4,26 @@ import (
 	"github.com/boy-hack/ksubdomain/v2/pkg/core/gologger"
 	"github.com/boy-hack/ksubdomain/v2/pkg/runner/result"
 	"sort"
+	"github.com/boy-hack/ksubdomain/v2/pkg/runner" // For WildcardDetectionResult
 	"strings"
 )
+
+// Helper to extract base domain (e.g., example.com from sub.example.com)
+// This is a simplified version, real TLD/eTLD handling is complex.
+func getBaseDomain(domain string) string {
+	parts := strings.Split(domain, ".")
+	if len(parts) > 2 {
+		// Handle cases like sub.sub.example.co.uk by joining last 3, or example.com by joining last 2
+		// This needs to be smarter or rely on a pre-calculated BaseDomain in result.Result
+		// For now, a common case:
+		if len(parts) > 2 && (len(parts[len(parts)-2]) <= 3 && len(parts[len(parts)-1]) <= 3) { // e.g. co.uk, com.au
+			return strings.Join(parts[len(parts)-3:], ".")
+		}
+		return strings.Join(parts[len(parts)-2:], ".")
+	}
+	return domain
+}
+
 
 type Pair struct {
 	Key   string
@@ -30,21 +48,21 @@ func sortMapByValue(m map[string]int) PairList {
 }
 
 // WildFilterOutputResult 泛解析过滤结果
-func WildFilterOutputResult(outputType string, results []result.Result) []result.Result {
+func WildFilterOutputResult(outputType string, results []result.Result, wildcardInfo map[string]*runner.WildcardDetectionResult) []result.Result {
 	if outputType == "none" {
 		return results
 	} else if outputType == "basic" {
-		return FilterWildCard(results)
+		return FilterWildCard(results, wildcardInfo)
 	} else if outputType == "advanced" {
-		return FilterWildCardAdvanced(results)
+		return FilterWildCardAdvanced(results, wildcardInfo)
 	}
-	return nil
+	return results // Return original if filter type is unknown, or handle error
 }
 
 // FilterWildCard 基于Result类型数据过滤泛解析
 // 传入参数为[]result.Result，返回过滤后的[]result.Result
 // 通过分析整体结果，对解析记录中相同的ip进行阈值判断，超过则丢弃该结果
-func FilterWildCard(results []result.Result) []result.Result {
+func FilterWildCard(results []result.Result, detectedWildcards map[string]*runner.WildcardDetectionResult) []result.Result {
 	if len(results) == 0 {
 		return results
 	}
@@ -77,33 +95,40 @@ func FilterWildCard(results []result.Result) []result.Result {
 	// 使用两个标准：
 	// 1. IP解析超过总域名数量的特定百分比(动态阈值)
 	// 2. 该IP解析的子域名数量超过特定阈值
-	suspiciousIPs := make(map[string]bool)
+	suspiciousIPs := make(map[string]bool) // IP => isSuspiciousByFrequency
 
+	// Populate suspiciousIPs from pre-detected wildcards
+	if detectedWildcards != nil {
+		for baseDomain, wcResult := range detectedWildcards {
+			if wcResult.IsWildcard {
+				gologger.Debugf("Using pre-detected wildcard IPs for %s: %v", baseDomain, wcResult.WildcardIPs)
+				for _, ip := range wcResult.WildcardIPs {
+					suspiciousIPs[ip] = true // Mark pre-detected wildcard IPs as initially suspicious
+				}
+				// Pre-detected CNAMEs will be handled later, directly against result answers.
+			}
+		}
+	}
+
+	// Frequency-based detection (can augment or work if pre-detection is missing for a base domain)
 	for _, pair := range sortedIPs {
 		ip := pair.Key
 		count := pair.Value
 
-		// 计算该IP解析占总体的百分比
-		percentage := float64(count) / float64(totalDomains) * 100
-
-		// 动态阈值：根据总域名数量调整
-		// 域名数量少时阈值较高，域名数量多时阈值较低
-		var threshold float64
-		if totalDomains < 100 {
-			threshold = 30 // 如果域名总数小于100，阈值设为30%
-		} else if totalDomains < 1000 {
-			threshold = 20 // 如果域名总数在100-1000，阈值设为20%
-		} else {
-			threshold = 10 // 如果域名总数超过1000，阈值设为10%
+		// If already marked by pre-detection, skip frequency check or use it to reinforce
+		if suspiciousIPs[ip] {
+			gologger.Debugf("IP %s already marked as suspicious by pre-detection.", ip)
+			continue
 		}
 
-		// 绝对数量阈值
+		// 计算该IP解析占总体的百分比
+		percentage := float64(count) / float64(totalDomains) * 100
+		var threshold float64
+		if totalDomains < 100 { threshold = 30.0 } else if totalDomains < 1000 { threshold = 20.0 } else { threshold = 10.0 }
 		absoluteThreshold := 70
 
-		// 如果超过阈值，标记为可疑IP
 		if percentage > threshold || count > absoluteThreshold {
-			gologger.Debugf("发现可疑泛解析IP: %s (解析了 %d 个域名, %.2f%%)\n",
-				ip, count, percentage)
+			gologger.Debugf("IP %s marked as suspicious by frequency: (count: %d, %.2f%%)", ip, count, percentage)
 			suspiciousIPs[ip] = true
 		}
 	}
@@ -117,25 +142,94 @@ func FilterWildCard(results []result.Result) []result.Result {
 		validRecord := false
 		var filteredAnswers []string
 
+		currentBaseDomain := getBaseDomain(res.Subdomain)
+		wcSpecificResult, wcSpecificInfoExists := detectedWildcards[currentBaseDomain]
+
 		for _, answer := range res.Answers {
-			// 保留所有非IP记录(如CNAME)
-			if strings.HasPrefix(answer, "CNAME ") || strings.HasPrefix(answer, "NS ") ||
-				strings.HasPrefix(answer, "TXT ") || strings.HasPrefix(answer, "PTR ") {
-				validRecord = true
+			isCNAMERecord := strings.HasPrefix(answer, "CNAME ")
+			isNSRecord := strings.HasPrefix(answer, "NS ")
+			isTXTRecord := strings.HasPrefix(answer, "TXT ")
+			isPTRRecord := strings.HasPrefix(answer, "PTR ")
+			isOtherNonIP := isNSRecord || isTXTRecord || isPTRRecord
+
+			if isCNAMERecord {
+				cnameTarget := strings.SplitN(answer, " ", 2)[1]
+				isWildcardCNAME := false
+				if wcSpecificInfoExists && wcResult.IsWildcard {
+					for _, wcCNAME := range wcResult.WildcardCNAMEs {
+						if cnameTarget == wcCNAME {
+							isWildcardCNAME = true
+							break
+						}
+					}
+				}
+				if !isWildcardCNAME {
+					validRecord = true
+					filteredAnswers = append(filteredAnswers, answer)
+				} else {
+					gologger.Debugf("Filtering CNAME record %s for %s due to pre-detected wildcard CNAME %s", answer, res.Subdomain, cnameTarget)
+				}
+			} else if isOtherNonIP {
+				validRecord = true // Keep NS, TXT, PTR etc.
 				filteredAnswers = append(filteredAnswers, answer)
-			} else if !suspiciousIPs[answer] {
-				// 保留不在可疑IP列表中的IP
-				validRecord = true
-				filteredAnswers = append(filteredAnswers, answer)
+			} else { // IP Record
+				isWildcardIPByPreDetection := false
+				if wcSpecificInfoExists && wcResult.IsWildcard {
+					for _, wcIP := range wcResult.WildcardIPs {
+						if answer == wcIP {
+							isWildcardIPByPreDetection = true
+							break
+						}
+					}
+				}
+
+				if isWildcardIPByPreDetection {
+					gologger.Debugf("Filtering IP %s for %s due to pre-detected wildcard IP.", answer, res.Subdomain)
+					// Do not add to filteredAnswers, and validRecord might become false if this is the only IP
+				} else if !suspiciousIPs[answer] { // Not suspicious by frequency either
+					validRecord = true
+					filteredAnswers = append(filteredAnswers, answer)
+				} else {
+					gologger.Debugf("Filtering IP %s for %s due to frequency-based wildcard detection.", answer, res.Subdomain)
+				}
 			}
 		}
 
 		if validRecord && len(filteredAnswers) > 0 {
-			filteredRes := result.Result{
-				Subdomain: res.Subdomain,
-				Answers:   filteredAnswers,
+			// Ensure we don't add a result if all its original IPs were filtered out
+			// and it only contained IPs.
+			allIPsFiltered := true
+			if len(res.Answers) > 0 && len(filteredAnswers) == 0 { // All answers were IPs and all were filtered
+				 for _, origAnswer := range res.Answers {
+					 if strings.HasPrefix(origAnswer, "CNAME ") || strings.HasPrefix(origAnswer, "NS ") ||
+						strings.HasPrefix(origAnswer, "TXT ") || strings.HasPrefix(origAnswer, "PTR ") {
+						allIPsFiltered = false // It had non-IPs, so empty filteredAnswers might be valid if those non-IPs were also filtered (e.g. wildcard CNAME)
+						break
+					 }
+				 }
+			} else if len(filteredAnswers) > 0 { // Some answers remain
+				allIPsFiltered = false
 			}
-			filteredResults = append(filteredResults, filteredRes)
+
+
+			if !allIPsFiltered {
+				// If a result originally had only IPs, and all IPs were wildcard,
+				// validRecord might still be false here. We need to ensure that if filteredAnswers is empty,
+				// but it was because all IPs were filtered, we don't add it.
+				// The logic for validRecord needs to be robust.
+				// validRecord should be true if AT LEAST ONE answer was deemed non-wildcard.
+				// If all answers are filtered out, len(filteredAnswers) will be 0.
+
+				filteredRes := result.Result{
+					Subdomain: res.Subdomain,
+					Answers:   filteredAnswers,
+					Source:    res.Source, // Preserve original source
+					CNAMEChain: res.CNAMEChain, // Preserve CNAME chain
+				}
+				filteredResults = append(filteredResults, filteredRes)
+			} else {
+				gologger.Debugf("Subdomain %s removed entirely after wildcard filtering (all its answers were wildcards).", res.Subdomain)
+			}
 		}
 	}
 
@@ -147,7 +241,7 @@ func FilterWildCard(results []result.Result) []result.Result {
 
 // FilterWildCardAdvanced 提供更高级的泛解析检测算法
 // 使用多种启发式方法和特征检测来识别泛解析
-func FilterWildCardAdvanced(results []result.Result) []result.Result {
+func FilterWildCardAdvanced(results []result.Result, detectedWildcards map[string]*runner.WildcardDetectionResult) []result.Result {
 	if len(results) == 0 {
 		return results
 	}
@@ -223,14 +317,26 @@ func FilterWildCardAdvanced(results []result.Result) []result.Result {
 	sortedIPs := sortMapByValue(ipFrequency)
 
 	// 识别可疑IP列表
-	suspiciousIPs := make(map[string]float64) // IP -> 可疑度分数(0-100)
+	suspiciousIPScores := make(map[string]float64) // IP -> 可疑度分数(0-100)
+
+	// Incorporate pre-detected wildcard IPs into scoring
+	if detectedWildcards != nil {
+		for baseDomain, wcResult := range detectedWildcards {
+			if wcResult.IsWildcard {
+				gologger.Debugf("AdvFilter: Using pre-detected wildcard IPs for %s: %v", baseDomain, wcResult.WildcardIPs)
+				for _, ip := range wcResult.WildcardIPs {
+					suspiciousIPScores[ip] = 75.0 // Assign a high initial score for pre-detected wildcard IPs
+				}
+				// Pre-detected CNAMEs will be handled later.
+			}
+		}
+	}
+
 
 	for _, pair := range sortedIPs {
 		ip := pair.Key
 		count := pair.Value
-
-		// 初始可疑度分数
-		suspiciousScore := 0.0
+		currentScore := suspiciousIPScores[ip] // Get pre-assigned score or 0
 
 		// 因子1: IP频率百分比
 		freqPercentage := float64(count) / float64(totalDomains) * 100
@@ -243,51 +349,39 @@ func FilterWildCardAdvanced(results []result.Result) []result.Result {
 		tldVariety := len(ipTLDVariety[ip])
 
 		// 计算可疑度分数
-		// 1. 频率因子
-		if freqPercentage > 30 {
-			suspiciousScore += 40
-		} else if freqPercentage > 10 {
-			suspiciousScore += 20
-		} else if freqPercentage > 5 {
-			suspiciousScore += 10
+		// 1. 频率因子 - Only add if not heavily scored by pre-detection
+		if currentScore < 50 { // Avoid double-counting if already high from pre-detection
+			if freqPercentage > 30 { currentScore += 40 } else if freqPercentage > 10 { currentScore += 20 } else if freqPercentage > 5 { currentScore += 10 }
 		}
+
 
 		// 2. 前缀多样性因子
-		// 如果一个IP解析了大量不同前缀的域名，可能是CDN或者泛解析
-		if prefixVarietyRatio > 90 && prefixVariety > 10 {
-			suspiciousScore += 30
-		} else if prefixVarietyRatio > 70 && prefixVariety > 5 {
-			suspiciousScore += 20
-		}
+		if prefixVarietyRatio > 90 && prefixVariety > 10 { currentScore += 30 } else if prefixVarietyRatio > 70 && prefixVariety > 5 { currentScore += 20 }
 
 		// 3. 绝对数量因子
-		if count > 100 {
-			suspiciousScore += 20
-		} else if count > 50 {
-			suspiciousScore += 10
-		} else if count > 20 {
-			suspiciousScore += 5
-		}
+		if count > 100 { currentScore += 20 } else if count > 50 { currentScore += 10 } else if count > 20 { currentScore += 5 }
 
-		// 4. TLD多样性因子 - 如果一个IP解析了多个不同TLD，更可能是合法的
-		if tldVariety > 3 {
-			suspiciousScore -= 20
-		} else if tldVariety > 1 {
-			suspiciousScore -= 10
-		}
+		// 4. TLD多样性因子 - If an IP serves multiple distinct domains, it's less likely a narrow wildcard for one.
+		if tldVariety > 3 { currentScore -= 20 } else if tldVariety > 1 { currentScore -= 10 }
 
-		// 只有当可疑度分数超过阈值时，才标记为可疑IP
-		if suspiciousScore >= 35 {
-			gologger.Debugf("可疑IP: %s (解析域名数: %d, 占比: %.2f%%, 前缀多样性: %d/%d, 可疑度: %.2f)\n",
-				ip, count, freqPercentage, prefixVariety, count, suspiciousScore)
-			suspiciousIPs[ip] = suspiciousScore
+		// Cap score at 100
+		if currentScore > 100 { currentScore = 100 }
+		if currentScore < 0 { currentScore = 0 } // Should not happen with current logic
+
+		if currentScore >= 35 { // Threshold to be considered suspicious
+			gologger.Debugf("Suspicious IP (Adv): %s (Count: %d, Freq: %.2f%%, PrefixVar: %d/%d, TLDVar: %d, Score: %.2f)",
+				ip, count, freqPercentage, prefixVariety, count, tldVariety, currentScore)
+			suspiciousIPScores[ip] = currentScore
+		} else {
+			delete(suspiciousIPScores, ip) // Remove if score is too low
 		}
 	}
+
 
 	// 第二轮：过滤结果
 	var filteredResults []result.Result
 
-	// CNAME聚类分析：检测指向相同目标的多个CNAME记录
+	// CNAME聚类分析 + pre-detected CNAMEs
 	cnameTargetCount := make(map[string]int)
 	for _, targets := range cnameRecords {
 		for _, target := range targets {
@@ -296,66 +390,81 @@ func FilterWildCardAdvanced(results []result.Result) []result.Result {
 	}
 
 	// 识别可疑CNAME目标
-	suspiciousCnames := make(map[string]bool)
+	suspiciousCNAMEs := make(map[string]bool) // CNAME target => isSuspicious
+
+	// Add pre-detected CNAMEs
+	if detectedWildcards != nil {
+		for baseDomain, wcResult := range detectedWildcards {
+			if wcResult.IsWildcard {
+				gologger.Debugf("AdvFilter: Using pre-detected wildcard CNAMEs for %s: %v", baseDomain, wcResult.WildcardCNAMEs)
+				for _, wcCNAME := range wcResult.WildcardCNAMEs {
+					suspiciousCNAMEs[wcCNAME] = true
+				}
+			}
+		}
+	}
+
+	// CNAME frequency analysis (augment pre-detection)
 	for cname, count := range cnameTargetCount {
-		if count > 5 && float64(count)/float64(totalDomains)*100 > 10 {
-			gologger.Debugf("可疑CNAME目标: %s (指向次数: %d)\n", cname, count)
-			suspiciousCnames[cname] = true
+		if suspiciousCNAMEs[cname] { // Already marked by pre-detection
+			gologger.Debugf("AdvFilter: CNAME %s already marked as suspicious by pre-detection.", cname)
+			continue
+		}
+		if count > 5 && float64(count)/float64(totalDomains)*100 > 10 { // Heuristic for frequency-based CNAME wildcard
+			gologger.Debugf("AdvFilter: CNAME %s marked as suspicious by frequency (count: %d)", cname, count)
+			suspiciousCNAMEs[cname] = true
 		}
 	}
 
 	// 过滤结果
 	for _, res := range results {
-		// 检查是否含有可疑CNAME
-		hasSuspiciousCname := false
-		if targets, ok := cnameRecords[res.Subdomain]; ok {
-			for _, target := range targets {
-				if suspiciousCnames[target] {
-					hasSuspiciousCname = true
-					break
-				}
-			}
-		}
-
-		validRecord := !hasSuspiciousCname
 		var filteredAnswers []string
+		isResultValid := true // Assume valid initially
 
-		// 处理所有回答
 		for _, answer := range res.Answers {
-			isIP := !strings.HasPrefix(answer, "CNAME ") &&
+			isIPRecord := !strings.HasPrefix(answer, "CNAME ") &&
 				!strings.HasPrefix(answer, "NS ") &&
 				!strings.HasPrefix(answer, "TXT ") &&
 				!strings.HasPrefix(answer, "PTR ")
 
-			// 保留所有非IP记录但排除可疑CNAME
-			if !isIP {
-				if strings.HasPrefix(answer, "CNAME ") {
-					cnameParts := strings.SplitN(answer, " ", 2)
-					if len(cnameParts) == 2 && suspiciousCnames[cnameParts[1]] {
-						continue // 跳过可疑CNAME
-					}
+			if isIPRecord {
+				score, isSuspiciousIP := suspiciousIPScores[answer]
+				if isSuspiciousIP && score >= 50 { // Stricter threshold for filtering in advanced mode
+					// IP is suspicious, don't add it
+					gologger.Debugf("AdvFilter: Filtering IP %s for %s (score: %.2f)", answer, res.Subdomain, score)
+					continue
 				}
-				validRecord = true
+				filteredAnswers = append(filteredAnswers, answer)
+			} else if strings.HasPrefix(answer, "CNAME ") {
+				cnameTarget := strings.SplitN(answer, " ", 2)[1]
+				if suspiciousCNAMEs[cnameTarget] {
+					// CNAME target is suspicious, don't add this CNAME record
+					gologger.Debugf("AdvFilter: Filtering CNAME %s for %s (target: %s)", answer, res.Subdomain, cnameTarget)
+					continue
+				}
 				filteredAnswers = append(filteredAnswers, answer)
 			} else {
-				// 针对IP记录，根据可疑度评分过滤
-				suspiciousScore, isSuspicious := suspiciousIPs[answer]
-
-				// 如果不在可疑IP列表中，或者可疑度较低，则保留
-				if !isSuspicious || suspiciousScore < 50 {
-					validRecord = true
-					filteredAnswers = append(filteredAnswers, answer)
-				}
+				// Non-IP, non-CNAME record (NS, TXT, etc.), keep it
+				filteredAnswers = append(filteredAnswers, answer)
 			}
 		}
 
-		// 只添加有效记录
-		if validRecord && len(filteredAnswers) > 0 {
+		// If all answers were filtered out, the result itself is invalid
+		if len(res.Answers) > 0 && len(filteredAnswers) == 0 {
+			isResultValid = false
+			gologger.Debugf("AdvFilter: Subdomain %s removed entirely (all answers were wildcards or suspicious).", res.Subdomain)
+		}
+
+		if isResultValid && len(filteredAnswers) > 0 {
 			filteredRes := result.Result{
-				Subdomain: res.Subdomain,
-				Answers:   filteredAnswers,
+				Subdomain:  res.Subdomain,
+				Answers:    filteredAnswers,
+				CNAMEChain: res.CNAMEChain, // Preserve CNAME chain
+				Source:     res.Source,     // Preserve source
 			}
 			filteredResults = append(filteredResults, filteredRes)
+		} else if isResultValid && len(res.Answers) == 0 { // Case: original result had no answers
+			filteredResults = append(filteredResults, res) // Keep it as is
 		}
 	}
 

@@ -102,27 +102,38 @@ var verifyCommand = &cli.Command{
 			Required: false,
 			Value:    "",
 		},
+		&cli.UintFlag{ // Added MaxCNAMERecs flag
+			Name:  "max-cname-recs",
+			Usage: "Maximum CNAME recursion depth",
+			Value: 10, // Default value
+		},
 	}, commonFlags...),
 	Action: func(c *cli.Context) error {
 		if c.NumFlags() == 0 {
 			cli.ShowCommandHelpAndExit(c, "verify", 0)
 		}
-		var domains []string
+		var domains []string // This will be used for the render channel
+		var inputDomains []string // To store the initial list of domains for OriginalDomains
 		var processBar processbar2.ProcessBar = &processbar2.ScreenProcess{}
+
 		if c.StringSlice("domain") != nil {
-			domains = append(domains, c.StringSlice("domain")...)
+			inputDomains = append(inputDomains, c.StringSlice("domain")...)
 		}
 		if c.Bool("stdin") {
 			scanner := bufio.NewScanner(os.Stdin)
 			scanner.Split(bufio.ScanLines)
 			for scanner.Scan() {
-				domains = append(domains, scanner.Text())
+				inputDomains = append(inputDomains, scanner.Text())
 			}
 		}
+
+		// Populate domains for the render channel from inputDomains
+		domains = inputDomains
+
 		render := make(chan string)
 		// 读取文件
 		go func() {
-			for _, line := range domains {
+			for _, line := range domains { // Iterates over inputDomains via domains
 				render <- line
 			}
 			if c.String("filename") != "" {
@@ -187,6 +198,8 @@ var verifyCommand = &cli.Command{
 			EtherInfo:          options.GetDeviceConfig(resolver),
 			WildcardFilterMode: c.String("wild-filter-mode"),
 			Predict:            c.Bool("predict"),
+			MaxCNAMERecs:       uint8(c.Uint("max-cname-recs")), // Set MaxCNAMERecs from flag
+			OriginalDomains:    inputDomains,                    // Pass collected domains for wildcard detection
 		}
 		opt.Check()
 		ctx := context.Background()

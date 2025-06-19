@@ -4,8 +4,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/boy-hack/ksubdomain/v2/pkg/runner" // For WildcardDetectionResult
 	"github.com/boy-hack/ksubdomain/v2/pkg/runner/result"
-
 	"github.com/boy-hack/ksubdomain/v2/pkg/utils"
 )
 
@@ -38,9 +38,11 @@ func (f *FileOutPut) WriteDomainResult(domain result.Result) error {
 	f.domains = append(f.domains, domain)
 	return err
 }
-func (f *FileOutPut) Close() error {
-	f.output.Close()
-	results := utils.WildFilterOutputResult(f.wildFilterMode, f.domains)
+func (f *FileOutPut) Close(wildcardInfo map[string]*runner.WildcardDetectionResult) error {
+	if f.output != nil {
+		f.output.Close() // Close the initial append-only file handle.
+	}
+	results := utils.WildFilterOutputResult(f.wildFilterMode, f.domains, wildcardInfo)
 	buf := strings.Builder{}
 	for _, item := range results {
 		buf.WriteString(item.Subdomain + "=>")
